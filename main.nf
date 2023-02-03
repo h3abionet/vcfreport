@@ -1,61 +1,77 @@
+#!/usr/bin/env nextflow
 nextflow.enable.dsl=2
 
-def check_files(file_list) {
-    file_list.each { myfile ->
-        if (!file(myfile).exists() && !file(myfile).isFile()) exit 1, "|-- ERROR: File ${myfile} not found. Please check your config file."
-    }
-}
 
-process count_markers {
-    tag "count_markers_${dataset}_${chrm}"
+include {check_files; get_sites_only_1; combine_vcfs_1; bcftools_stats; parse_bcftools_stats; combine_csv } from './modules/qc'
 
-    input:
-      tuple val(dataset), val(chrm), file(dataset_vcf_set)
-    output:
-      tuple val(dataset), file(dataset_vcf_set), file(count)
-    script:
-      count = "${chrm}.txt"
-      dataset_vcf = dataset_vcf_set[0]
-      """
-      echo -e "${chrm}: \$(bcftools index --nrecords ${dataset_vcf})" > ${count}
-      """
-}
+workflow report{
+    take:
 
-process combine_counts {
-    tag "combine_counts_${dataset}"
-    input:
-        tuple val(dataset), val(vcf_files), val(counts_files)
-    output:
-        tuple val(dataset), file(count_summary)
-    script:
-        count_summary = "${dataset}_summary.txt"
-        """
-        cat ${counts_files.join(" ")} | sort -V >> ${count_summary}
-        TOTAL=\$(cut -f 2 -d' ' ${count_summary}| bc)
-        echo -e "Total: ${TOTAL}" >> ${count_summary}
-        """
-}
-
-def unppack = {
-     (chromosome, files) -> chromosome
-}
-
-workflow {
-    datasets = []
-
-    params.globDatasets.each { dataset_name, dataset_glob ->
-        println dataset_name
-        pattern = dataset_glob + '{,.tbi}'
-        vcfs_channel2 = Channel
-            .fromFilePairs(pattern)
-            .map { [dataset_name, it[0], it[1]] }
-        count_markers(vcfs_channel2)
+    main:
+        datasets = []
+        params.datasets.each { dataset, description, dataset_vcf, dataset_sample ->
+            datas = []
+            dataset_vcfs = file(dataset_vcf)
+            if (dataset_vcfs instanceof List){
+                dataset_vcfs.each{ vcf ->
+                    datas = [ dataset, description.split().join('-') ]
+                    check_files([vcf, dataset_sample])
+                    datas << vcf
+                    datas << dataset_sample
+                    datasets << datas 
+                }
+            }
+            else{
+                datas = [ dataset, description.split().join('-') ]
+                check_files([dataset_vcf, dataset_sample])
+                datas << dataset_vcf
+                datas << dataset_sample
+                datasets << datas 
+            }
+            
         }
+        datasets_sites = []
+        params.datasets_sites.each { dataset, description, dataset_vcf, dataset_sample ->
+            datas = []
+            dataset_vcfs = file(dataset_vcf)
+            if (dataset_vcfs instanceof List){
+                dataset_vcfs.each{ vcf ->
+                    datas = [ dataset, description.split().join('-') ]
+                    check_files([vcf, dataset_sample])
+                    datas << vcf
+                    datas << dataset_sample
+                    datasets_sites << datas 
+                }
+            }
+            else{
+                datas = [ dataset, description.split().join('-') ]
+                check_files([dataset_vcf, dataset_sample])
+                datas << dataset_vcf
+                datas << dataset_sample
+                datasets_sites << datas 
+            }
+            
+        }
+        datasets_ch = Channel.from(datasets)
+        datasets_sites_ch = Channel.from(datasets_sites)
+        
+        get_sites_only_1(datasets_ch.map{ dataset, description, vcf, sample -> [ dataset, description, file(vcf) ] })
+        sites_datas = get_sites_only_1.out.groupTuple(by:[0,1])
+            .mix(datasets_sites_ch.groupTuple(by:[0,1])
+            .map{ dataset, desc, vcfs, samples -> [ dataset, desc, vcfs ]})
+        combine_vcfs_1(sites_datas)
+        bcftools_stats(combine_vcfs_1.out)
+        parse_bcftools_stats(bcftools_stats.out)
+        all_stats = parse_bcftools_stats.out.map{ dataset, step, stats -> [ 'H3A_report', dataset, step, stats ] }
+            .groupTuple(by:0)
+            .map{ group, datasets, steps, stats -> [ group, stats, 'csv' ] }
+        combine_csv(all_stats)
 
-    // Count per chrm
-    //count_markers(datasets_cha)
+    emit:
+        datasets_ch
+}
 
-    // Combine
-    counts_cha = count_markers.out.groupTuple(by:0)
-    combine_counts(counts_cha).view()
+
+workflow{
+    report()
 }
